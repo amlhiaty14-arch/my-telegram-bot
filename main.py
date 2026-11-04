@@ -6,15 +6,24 @@ import time
 import json
 import base64
 import requests
+
 from bs4 import BeautifulSoup
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
-TOKEN = os.environ["TELEGRAM_TOKEN"]
-API = f"https://api.telegram.org/bot{TOKEN}"
+# =========================
+# SETTINGS
+# =========================
+
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+API = f"https://api.telegram.org/bot{TOKEN}" if TOKEN else ""
+
 JUMIA = "https://www.jumia.com.eg"
-
 MIN_DISCOUNT = 70
 MAX_DEALS = 20
+
+REPO = os.environ.get("GITHUB_REPOSITORY", "")
+GH_TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+STATE_FILE = "bot_state.json"
 
 SEARCHES = [
     "DeFacto jacket men",
@@ -27,46 +36,80 @@ SEARCHES = [
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
 })
 
-REPO = os.environ.get("GITHUB_REPOSITORY")
-GH_TOKEN = os.environ.get("GITHUB_TOKEN")
-STATE_FILE = "bot_state.json"
 
+# =========================
+# STATE STORAGE
+# =========================
 
 def load_state():
-    default = {"subscribers": [], "seen": [], "offset": 0}
+    default = {
+        "subscribers": [],
+        "seen": [],
+        "offset": 0
+    }
 
     if not REPO or not GH_TOKEN:
+        print("Warning: GitHub storage is not configured")
         return default
 
     url = f"https://api.github.com/repos/{REPO}/contents/{STATE_FILE}"
-    headers = {"Authorization": f"Bearer {GH_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json"
+    }
 
     try:
-        r = requests.get(url, headers=headers, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            content = base64.b64decode(data["content"]).decode("utf-8")
+        response = requests.get(url, headers=headers, timeout=20)
+
+        if response.status_code == 200:
+            data = response.json()
+            content = base64.b64decode(
+                data["content"]
+            ).decode("utf-8")
+
             state = json.loads(content)
             state["sha"] = data["sha"]
+
+            state.setdefault("subscribers", [])
+            state.setdefault("seen", [])
+            state.setdefault("offset", 0)
+
             return state
-    except Exception as e:
-        print("State loading error:", e)
+
+        if response.status_code != 404:
+            print("State loading error:", response.text)
+
+    except Exception as error:
+        print("State loading error:", error)
 
     return default
 
 
 def save_state(state):
     if not REPO or not GH_TOKEN:
-        print("Warning: persistent storage unavailable")
+        print("Warning: State was not saved")
         return
 
     url = f"https://api.github.com/repos/{REPO}/contents/{STATE_FILE}"
-    headers = {"Authorization": f"Bearer {GH_TOKEN}"}
 
-    data = {k: v for k, v in state.items() if k != "sha"}
+    headers = {
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    data = {
+        "subscribers": state.get("subscribers", []),
+        "seen": state.get("seen", []),
+        "offset": state.get("offset", 0)
+    }
+
     content = base64.b64encode(
         json.dumps(data, ensure_ascii=False).encode("utf-8")
     ).decode("utf-8")
@@ -79,16 +122,25 @@ def save_state(state):
     if state.get("sha"):
         payload["sha"] = state["sha"]
 
-    r = requests.put(url, headers=headers, json=payload, timeout=30)
-    r.raise_for_status()
+    response = requests.put(
+        url,
+        headers=headers,
+        json=payload,
+        timeout=30
+    )
 
-    if r.status_code not in (200, 201):
-        raise RuntimeError("Could not save bot state")
+    response.raise_for_status()
 
+    print("Bot state saved successfully")
+
+
+# =========================
+# TELEGRAM
+# =========================
 
 def send_message(chat_id, message):
     try:
-        r = requests.post(
+        response = requests.post(
             API + "/sendMessage",
             data={
                 "chat_id": chat_id,
@@ -97,18 +149,31 @@ def send_message(chat_id, message):
             },
             timeout=25
         )
-        r.raise_for_status()
-        result = r.json()
-        if not result.get("ok"):
-            print("Telegram rejected message:", result)
-    except Exception as e:
-        print("Telegram error:", e)
 
+        response.raise_for_status()
+        result = response.json()
+
+        if result.get("ok"):
+            return True
+
+        print("Telegram error:", result)
+
+    except Exception as error:
+        print("Telegram sending error:", error)
+
+    return False
+
+
+# =========================
+# PRICE AND PRODUCT SEARCH
+# =========================
 
 def get_number(value):
     if not value:
         return None
-    digits = re.sub(r"[^\d]", "", value)
+
+    digits = re.sub(r"[^\d]", "", str(value))
+
     return int(digits) if digits else None
 
 
@@ -122,11 +187,19 @@ def search_jumia(query):
 
         soup = BeautifulSoup(response.text, "html.parser")
 
-        for item in soup.select("article.prd, .prd"):
+        cards = soup.select("article.prd")
+
+        if not cards:
+            cards = soup.select(".prd")
+
+        for item in cards:
             name_tag = item.select_one(".name")
             price_tag = item.select_one(".prc")
             old_tag = item.select_one(".old")
             link_tag = item.select_one("a.core")
+
+            if not link_tag:
+                link_tag = item.select_one("a[href]")
 
             if not all([name_tag, price_tag, old_tag, link_tag]):
                 continue
@@ -150,15 +223,17 @@ def search_jumia(query):
             if not current or not old or old <= current:
                 continue
 
-            discount = round((old - current) / old * 100)
+            discount = round(
+                ((old - current) / old) * 100
+            )
 
             if discount < MIN_DISCOUNT:
                 continue
 
-            link = link_tag.get("href", "")
-
-            if link.startswith("/"):
-                link = JUMIA + link
+            link = urljoin(
+                JUMIA,
+                link_tag.get("href", "")
+            )
 
             if not link.startswith("https://"):
                 continue
@@ -171,14 +246,27 @@ def search_jumia(query):
                 "link": link
             })
 
-    except Exception as e:
-        print("Jumia search error:", query, e)
+        print(
+            f"Search: {query} | Found: {len(products)}"
+        )
+
+    except Exception as error:
+        print("Jumia search error:", query, error)
 
     return products
 
 
-def check_deals(chat_id, state):
-    send_message(chat_id, "🔎 جاري البحث عن أقوى عروض الجواكت...")
+# =========================
+# DEALS TRACKER
+# =========================
+
+def check_deals(chat_id, state, manual=False):
+
+    if manual:
+        send_message(
+            chat_id,
+            "🔎 جاري البحث عن أقوى عروض الجواكت..."
+        )
 
     found = []
 
@@ -186,103 +274,174 @@ def check_deals(chat_id, state):
         found.extend(search_jumia(query))
         time.sleep(2)
 
-    unique = {p["link"]: p for p in found}
+    unique = {
+        product["link"]: product
+        for product in found
+    }
 
     found = sorted(
         unique.values(),
-        key=lambda p: p["discount"],
+        key=lambda product: product["discount"],
         reverse=True
     )
 
     seen = set(state.get("seen", []))
-    new_deals = [p for p in found if p["link"] not in seen]
+
+    new_deals = [
+        product for product in found
+        if product["link"] not in seen
+    ]
 
     if not new_deals:
-        send_message(
-            chat_id,
-            "لم أجد عروضًا جديدة بخصم 70% أو أكثر حاليًا ❤️"
-        )
+        if manual:
+            send_message(
+                chat_id,
+                "لم أجد عروضًا جديدة بخصم 70% أو أكثر حاليًا ❤️"
+            )
         return
 
-    for p in new_deals[:MAX_DEALS]:
+    sent = 0
+
+    for product in new_deals[:MAX_DEALS]:
+
         message = (
-            f"🔥 خصم {p['discount']}%\n\n"
-            f"🧥 {p['name']}\n\n"
-            f"💰 السعر الحالي: {p['price']} جنيه\n"
-            f"🏷️ السعر القديم: {p['old']} جنيه\n\n"
-            f"🛒 رابط المنتج:\n{p['link']}"
+            f"🔥 خصم {product['discount']}%\n\n"
+            f"🧥 {product['name']}\n\n"
+            f"💰 السعر الحالي: {product['price']} جنيه\n"
+            f"🏷️ السعر القديم: {product['old']} جنيه\n\n"
+            f"🛒 رابط المنتج:\n{product['link']}"
         )
 
-        send_message(chat_id, message)
-        seen.add(p["link"])
+        if send_message(chat_id, message):
+            seen.add(product["link"])
+            sent += 1
+
         time.sleep(1)
 
     state["seen"] = list(seen)[-1000:]
 
+    print(
+        f"Deals sent to {chat_id}: {sent}"
+    )
+
+
+# =========================
+# TELEGRAM COMMANDS
+# =========================
 
 def process_updates(state):
+
     offset = state.get("offset", 0)
+    manually_checked = set()
 
     try:
-        r = requests.get(
+        response = requests.get(
             API + "/getUpdates",
-            params={"offset": offset, "timeout": 5},
+            params={
+                "offset": offset,
+                "timeout": 5
+            },
             timeout=15
         )
-        r.raise_for_status()
 
-        updates = r.json()
+        response.raise_for_status()
+        updates = response.json()
 
         if not updates.get("ok"):
-            return
+            print("Telegram update error:", updates)
+            return manually_checked
 
         for update in updates.get("result", []):
+
             state["offset"] = update["update_id"] + 1
 
             message = update.get("message", {})
             chat_id = message.get("chat", {}).get("id")
+
             command = message.get("text", "").strip().lower()
 
             if not chat_id:
                 continue
 
             if command.startswith("/start"):
+
                 if chat_id not in state["subscribers"]:
                     state["subscribers"].append(chat_id)
 
                 send_message(
                     chat_id,
-                    "أهلاً بيك ❤️\n"
+                    "أهلاً بيك ❤️\n\n"
                     "بوت صيد عروض الجواكت جاهز!\n\n"
-                    "أبحث عن DeFacto وCollins.\n"
-                    "رجالي وحريمي وأطفال.\n"
-                    "خصومات من 70% إلى 90% وأكثر.\n\n"
-                    "اكتب /check للبحث الآن."
+                    "🔹 DeFacto\n"
+                    "🔹 Collins\n"
+                    "🔹 رجالي وحريمي وأطفال\n"
+                    "🔹 خصومات 70% و80% و90% وأكثر\n\n"
+                    "اكتب /check للبحث الآن.\n"
+                    "اكتب /stop لإيقاف الاشتراك."
                 )
 
             elif command.startswith("/check"):
+
                 if chat_id not in state["subscribers"]:
                     state["subscribers"].append(chat_id)
 
-                check_deals(chat_id, state)
+                check_deals(chat_id, state, manual=True)
+                manually_checked.add(chat_id)
 
-    except Exception as e:
-        print("Update processing error:", e)
+            elif command.startswith("/stop"):
 
+                if chat_id in state["subscribers"]:
+                    state["subscribers"].remove(chat_id)
+
+                send_message(
+                    chat_id,
+                    "تم إيقاف اشتراكك في تنبيهات العروض ❤️"
+                )
+
+            elif command.startswith("/help"):
+
+                send_message(
+                    chat_id,
+                    "أوامر البوت:\n\n"
+                    "/start - الاشتراك\n"
+                    "/check - البحث عن العروض\n"
+                    "/stop - إيقاف الاشتراك\n"
+                    "/help - المساعدة"
+                )
+
+    except Exception as error:
+        print("Update processing error:", error)
+
+    return manually_checked
+
+
+# =========================
+# MAIN
+# =========================
 
 def main():
+
+    if not TOKEN:
+        raise RuntimeError(
+            "Missing TELEGRAM_TOKEN secret"
+        )
+
     print("Jacket Deals Tracker started")
 
     state = load_state()
 
-    process_updates(state)
+    manually_checked = process_updates(state)
 
     for chat_id in list(state["subscribers"]):
+
+        if chat_id in manually_checked:
+            continue
+
         check_deals(chat_id, state)
 
     save_state(state)
 
-    print("Jacket Deals Tracker finished successfully")
+    print("Jacket Deals Tracker finished")
 
 
 if __name__ == "__main__":
