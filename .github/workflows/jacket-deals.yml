@@ -1,6 +1,6 @@
 YAML
 
-name: Jacket Deals Tracker
+name: Jacket Deals Tracke
 
 'on':
   workflow_dispatch:
