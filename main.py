@@ -1,5 +1,5 @@
-"Python"
 
+python
 import os
 import re
 import time
@@ -18,24 +18,24 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 API = f"https://api.telegram.org/bot{TOKEN}" if TOKEN else ""
 
 JUMIA = "https://www.jumia.com.eg"
+
+# تحديد نسب الخصم المطلوبة بدقة (من 70 إلى 90)
 MIN_DISCOUNT = 70
+MAX_DISCOUNT = 90
 MAX_DEALS = 20
 
 REPO = os.environ.get("GITHUB_REPOSITORY", "")
 GH_TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
 STATE_FILE = "bot_state.json"
 
+# قائمة البحث المخصصة لجواكت ديفاكتو فقط (رجالي، حريمي، أطفال)
 SEARCHES = [
     "DeFacto jacket men",
     "DeFacto jacket women",
     "DeFacto jacket kids",
-    "Collins jacket men",
-    "Collins jacket women",
-    "Collins jacket kids",
 ]
 
 session = requests.Session()
-python
 session.headers.update({
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -213,8 +213,9 @@ def search_jumia(query):
             ]):
                 continue
 
+            # الفلترة لتشمل ديفاكتو فقط
             if not any(brand in title for brand in [
-                "defacto", "de facto", "collins"
+                "defacto", "de facto"
             ]):
                 continue
 
@@ -228,7 +229,8 @@ def search_jumia(query):
                 ((old - current) / old) * 100
             )
 
-            if discount < MIN_DISCOUNT:
+            # التحقق من أن الخصم بين 70% و 90% حصرياً
+            if not (MIN_DISCOUNT <= discount <= MAX_DISCOUNT):
                 continue
 
             link = urljoin(
@@ -266,7 +268,7 @@ def check_deals(chat_id, state, manual=False):
     if manual:
         send_message(
             chat_id,
-            "🔎 جاري البحث عن أقوى عروض الجواكت..."
+            "🔎 جاري البحث عن أقوى عروض جواكت DeFacto..."
         )
 
     found = []
@@ -297,7 +299,7 @@ def check_deals(chat_id, state, manual=False):
         if manual:
             send_message(
                 chat_id,
-                "لم أجد عروضًا جديدة بخصم 70% أو أكثر حاليًا ❤️"
+                "لم أجد عروضًا جديدة لـ DeFacto بخصم بين 70% و 90% حاليًا ❤️"
             )
         return
 
@@ -372,11 +374,10 @@ def process_updates(state):
                 send_message(
                     chat_id,
                     "أهلاً بيك ❤️\n\n"
-                    "بوت صيد عروض الجواكت جاهز!\n\n"
-                    "🔹 DeFacto\n"
-                    "🔹 Collins\n"
+                    "بوت صيد عروض جواكت ديفاكتو جاهز!\n\n"
+                    "🔹 DeFacto فقط\n"
                     "🔹 رجالي وحريمي وأطفال\n"
-                    "🔹 خصومات 70% و80% و90% وأكثر\n\n"
+                    "🔹 خصومات محددة بين 70% و 90%\n\n"
                     "اكتب /check للبحث الآن.\n"
                     "اكتب /stop لإيقاف الاشتراك."
                 )
@@ -410,40 +411,40 @@ def process_updates(state):
                     "/help - المساعدة"
                 )
 
-    except Exception as error:
-        print("Update processing error:", error)
-
-    return manually_checked
-
-
-# =========================
-# MAIN
-# =========================
-
+يُرجى استخدام الرمز البرمجي بحذر.
+except Exception as error:
+print("Update processing error:", error)
+return manually_checked
+=========================
+MAIN
+=========================
 def main():
+if not TOKEN:
+raise RuntimeError(
+"Missing TELEGRAM_TOKEN secret"
+)
+print("Jacket Deals Tracker started")
+state = load_state()
+manually_checked = process_updates(state)
+for chat_id in list(state["subscribers"]):
+if chat_id in manually_checked:
+continue
+check_deals(chat_id, state)
+save_state(state)
+print("Jacket Deals Tracker finished")
+if name == "main":
+main()
 
-    if not TOKEN:
-        raise RuntimeError(
-            "Missing TELEGRAM_TOKEN secret"
-        )
+### 💡 أبرز ما تم تعديله:
+* **حذف ماركة Collins:** تمت إزالتها تماماً من قائمة `SEARCHES` ومن دالة التحقق من العنوان.
+* **تحديد الخصم (70% - 90%):** تمت إضافة شرط الفحص `if not (MIN_DISCOUNT <= discount <= MAX_DISCOUNT):` للتأكد من تخطي أي عروض خارج هذا النطاق بدقة.
+* **إصلاح أخطاء التنسيق:** تم مسح نصوص `"Python"` و `python` العشوائية ليكون الكود جاهزاً تماماً للتشغيل على الخادم أو على GitHub Actions.
 
-    print("Jacket Deals Tracker started")
-
-    state = load_state()
-
-    manually_checked = process_updates(state)
-
-    for chat_id in list(state["subscribers"]):
-
-        if chat_id in manually_checked:
-            continue
-
-        check_deals(chat_id, state)
-
-    save_state(state)
-
-    print("Jacket Deals Tracker finished")
+<FollowUp>
+هل تحتاج إلى مساعدة في **تجهيز ملف الـ Workflows على GitHub** لتشغيل هذا البوت تلقائياً كل ساعة؟
+</FollowUp>
 
 
-if __name__ == "__main__":
-    main()
+
+
+ردّ "وضع AI" أصبح جاهزًا
